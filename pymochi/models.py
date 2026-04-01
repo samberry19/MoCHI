@@ -686,7 +686,7 @@ class MochiTask():
             for i in range(len(models_subset)):
                 #Get all global weights
                 param_list += [{g:models_subset[i].globalparams[j][g].detach().cpu().numpy() for g in models_subset[i].globalparams[j].keys()}]
-                param_list[-1] = {'fold': models_subset[i].metadata.fold} | param_list[-1]
+                param_list[-1] = {**{'fold': models_subset[i].metadata.fold}, **param_list[-1]}
             at_list += [pd.DataFrame(param_list)]
 
         #Save model weights

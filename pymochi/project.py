@@ -233,7 +233,7 @@ class MochiProject():
         elif type(input_obj) == str:
             input_obj = pathlib.Path(input_obj)
         #Object not a path
-        elif type(input_obj) != pathlib.PosixPath:
+        elif not isinstance(input_obj, pathlib.Path):
             print("Error: Invalid fix_weights file path: does not exist.")
             return
             return None
@@ -274,7 +274,7 @@ class MochiProject():
         elif type(input_obj) == str:
             input_obj = pathlib.Path(input_obj)
         #Object not a path
-        elif type(input_obj) != pathlib.PosixPath:
+        elif not isinstance(input_obj, pathlib.Path):
             return None
         #Object does not exist or not a file
         if not (input_obj.exists() and input_obj.is_file()):
@@ -302,7 +302,7 @@ class MochiProject():
         elif type(input_obj) == str:
             input_obj = pathlib.Path(input_obj)
         #Object not a path
-        elif type(input_obj) != pathlib.PosixPath:
+        elif not isinstance(input_obj, pathlib.Path):
             print("Error: Invalid features file path: does not exist.")
             return None
         #Object does not exist or not a file

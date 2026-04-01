@@ -448,7 +448,7 @@ class MochiData:
         elif type(input_obj) == str:
             input_obj = pathlib.Path(input_obj)
         #Object not a path
-        elif type(input_obj) != pathlib.PosixPath:
+        elif not isinstance(input_obj, pathlib.Path):
             print("Error: custom_transformations argument invalid.")
             raise ValueError
         #Object does not exist or not a file

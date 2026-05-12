@@ -218,11 +218,22 @@ class FitnessData:
             self.variantCol = "aa_seq"
             self.mutationOrderCol = "Nham_aa"
 
+        #Auto-calculate Nham_aa from aa_seq if column is absent
+        if self.sequenceType == "aminoacid" and self.mutationOrderCol not in self.vtable.columns:
+            if 'aa_seq' in self.vtable.columns and 'WT' in self.vtable.columns:
+                wt_rows = self.vtable[self.vtable['WT'] == True]
+                if len(wt_rows) == 1:
+                    wt_seq = str(wt_rows.iloc[0]['aa_seq'])
+                    self.vtable[self.mutationOrderCol] = self.vtable['aa_seq'].apply(
+                        lambda seq: sum(a != b for a, b in zip(str(seq), wt_seq)) + abs(len(str(seq)) - len(wt_seq))
+                    )
+                    print("Warning: Nham_aa column not found. Auto-calculating from aa_seq.")
+
         #Check required columns exist
         if sum([i not in self.vtable.columns for i in [
-            self.variantCol, 
-            self.mutationOrderCol, 
-            'WT', 
+            self.variantCol,
+            self.mutationOrderCol,
+            'WT',
             'fitness',
             'sigma']])!=0:
             print("Error: Invalid fitness data: required columns not found.")

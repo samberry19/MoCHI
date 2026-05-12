@@ -54,7 +54,8 @@ class MochiProject():
         init_weights_directory = None,
         init_weights_task_id = 1,
         fix_weights = {},
-        sparse_method = None):
+        sparse_method = None,
+        overwrite = False):
         """
         Initialize a MochiProject object.
 
@@ -92,8 +93,9 @@ class MochiProject():
         :param init_weights_task_id: Task identifier to use for model weight initialization (default:1).
         :param fix_weights: Dictionary (or path to file) of layer names to fix weights (default:empty dict i.e. no layers fixed).
         :param sparse_method: Sparse model inference method: one of 'sig_highestorder_step' (optional).
+        :param overwrite: Overwrite existing project directory if it already exists (default:False). If False and the directory exists, a new directory with a numeric suffix (_1, _2, …) is used instead.
         :returns: MochiProject object.
-        """ 
+        """
 
         #Save attributes
         self.directory = directory
@@ -132,6 +134,7 @@ class MochiProject():
         self.init_weights_task_id = init_weights_task_id
         self.fix_weights = fix_weights
         self.sparse_method = sparse_method
+        self.overwrite = overwrite
 
         #Load model_design from file if necessary
         self.model_design = self.load_model_design(self.model_design)
@@ -160,10 +163,20 @@ class MochiProject():
         self.tasks = {}
         if not self.model_design.empty:
             #Create project directory
-            try:
+            if os.path.exists(self.directory):
+                if self.overwrite:
+                    print(f"Warning: Project directory already exists and will be overwritten: {self.directory}")
+                else:
+                    n = 1
+                    new_directory = f"{self.directory}_{n}"
+                    while os.path.exists(new_directory):
+                        n += 1
+                        new_directory = f"{self.directory}_{n}"
+                    print(f"Warning: Project directory already exists. Using new directory: {new_directory}")
+                    self.directory = new_directory
+                    os.mkdir(self.directory)
+            else:
                 os.mkdir(self.directory)
-            except FileExistsError:
-                print("Warning: Project directory already exists.")
 
             if sparse_method is None:
                 #Run CV tasks for all seeds

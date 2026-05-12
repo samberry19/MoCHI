@@ -62,6 +62,7 @@ def init_argparse(
     parser.add_argument('--init_weights_task_id', type = int, default = 1, help = "task identifier to use for model weight initialization (default:1)")
     parser.add_argument('--fix_weights', type = pathlib.Path, default = None, help = "path to file of layer names to fix weights (default: no layers fixed)")
     parser.add_argument('--sparse_method', type = str, default = None, help = "sparse model inference method: one of 'sig_highestorder_step' (default: no sparse inference)")
+    parser.add_argument('--overwrite', action = 'store_true', default = False, help = "overwrite existing project directory if it already exists (default: False; if not set, a new directory with a numeric suffix is used instead)")
     parser.add_argument('--predict', type = pathlib.Path, default = None, help = "path to supplementary variants file for prediction (default: None)")
     return parser
 
@@ -148,7 +149,8 @@ def main(
         init_weights_directory = args.init_weights_directory,
         init_weights_task_id = args.init_weights_task_id,
         fix_weights = args.fix_weights,
-        sparse_method = args.sparse_method)
+        sparse_method = args.sparse_method,
+        overwrite = args.overwrite)
 
     #######################################################################
     ## PREDICT PHENOTYPES ##

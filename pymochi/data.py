@@ -659,9 +659,12 @@ class MochiData:
         #Mutations observed for this phenotype
         mut_count = list(self.Xoh.loc[self.phenotypes['phenotype_'+str(phenotype)]==1,:].sum(axis = 0))
         pheno_mut = [self.Xoh.columns[i] for i in range(len(self.Xoh.columns)) if mut_count[i]!=0]
-        #All possible combinations of mutations
-        all_pos = list(set([i[1:-1] for i in pheno_mut if i!="WT"]))
-        all_pos_mut = {int(i):[j for j in pheno_mut if j[1:-1]==i] for i in all_pos}
+        #All possible combinations of mutations (single pass instead of O(positions*mutations) nested scan)
+        all_pos_mut = {}
+        for m in pheno_mut:
+            if m != "WT":
+                pos = int(m[1:-1])
+                all_pos_mut.setdefault(pos, []).append(m)
         all_features = {}
         for n in range(max_order + 1):
             #Order at least 2
@@ -980,70 +983,132 @@ class MochiData:
             print("Warning: Invalid feature names: "+",".join(invalid_features))
             # raise ValueError
 
-        #Select interactions
-        int_list = []
-        int_order_dict_retained = {}
-        int_list_names = []
-        #No shuffle if not downsampling
+        #Pre-convert to numpy once for fast vectorised column access
+        X_np = self.Xoh.values.astype(np.uint8)  # binary 0/1, smallest dtype
+        col_to_idx = {col: i for i, col in enumerate(self.Xoh.columns)}
+
+        #Arrange feature list for iteration (shuffle if downsampling)
         if downsample_interactions is None:
-            all_features_loop = {0: all_features_flat}
-        #Shuffle flattened features
+            features_to_process = all_features_flat
         elif type(downsample_interactions) in [float, int]:
             random.seed(seed)
-            all_features_loop = {0: random.sample(all_features_flat, len(all_features_flat))}
-        #Shuffle features separately per order
+            features_to_process = random.sample(all_features_flat, len(all_features_flat))
         else:
-            all_features_loop = {k:random.sample(all_features[k], len(all_features[k])) for k in all_features}
+            random.seed(seed)
+            features_to_process = list(itertools.chain(*[
+                random.sample(all_features[k], len(all_features[k])) for k in all_features]))
 
-        #Loop over all orders
-        for n in all_features_loop.keys():
-            #Loop over all features of this order
-            for c in all_features_loop[n]:
-                c_split = c.split("_")
-                #Check if feature desired
-                if (c in features) or features==[]:
-                    int_col = (self.Xoh.loc[:,c_split].sum(axis = 1)==len(c_split)).astype(int)
-                    #Check if minimum number of observations satisfied
-                    if sum(int_col) >= min_observed:
-                        int_list += [int_col]
-                        int_list_names += [c]
-                        if len(c_split) not in int_order_dict_retained.keys():
-                            int_order_dict_retained[len(c_split)] = 1
-                        else:
-                            int_order_dict_retained[len(c_split)] += 1
-                    # else:
-                    #     if len(c_split)==3 and sum(int_col)==1:
-                    #         print(c)
-                    #Check memory footprint
-                    if len(int_list)*len(self.Xoh) > max_cells:
-                        print(f"Error: Too many interaction terms: number of feature matrix cells >{max_cells:>.0e}")
-                        raise ValueError
-                    #Check if sufficient features obtained
-                    if type(downsample_interactions) == float:
-                        if len(int_list) == int(len(all_features_flat)*downsample_interactions):
-                            break
-                    elif type(downsample_interactions) == int:
-                        if len(int_list) == downsample_interactions:
-                            break
-                    elif type(downsample_interactions) == dict:
-                        if len(c_split) in int_order_dict_retained.keys():
-                            if int_order_dict_retained[len(c_split)] > downsample_interactions[len(c_split)] and downsample_interactions[len(c_split)]!=(-1):
-                                int_list.pop()
-                                int_list_names.pop()
-                                int_order_dict_retained[len(c_split)] -= 1
-                                break
-                            elif int_order_dict_retained == downsample_interactions:
-                                break
+        #Apply feature-name filter upfront if specified
+        if features != []:
+            feature_set = set(features)
+            features_to_process = [c for c in features_to_process if c in feature_set]
+
+        #Parse all feature names to column-index lists in one pass
+        all_splits = [c.split("_") for c in features_to_process]
+        all_pair_idx = [[col_to_idx[m] for m in split] for split in all_splits]
+        n_features = len(features_to_process)
+        int_order_dict_retained = {}
+
+        if n_features == 0:
+            self.Xohi = copy.deepcopy(self.Xoh)
+            if features != []:
+                print("Filtering features")
+                self.Xohi = self.filter_features(input_df=self.Xohi, features=features)
+            self.feature_names = self.Xohi.columns
+            return
+
+        #Vectorised co-occurrence counting: process all pairs in chunks to
+        #avoid materialising a huge intermediate matrix while still avoiding
+        #the Python-loop-per-pair overhead.
+        CHUNK = 1000
+        cooc_counts = np.empty(n_features, dtype=np.int32)
+        orders = [len(idx) for idx in all_pair_idx]
+        all_order2 = all(o == 2 for o in orders)
+
+        if all_order2:
+            #Fast path: fully vectorised for pairwise interactions
+            col_i = np.array([idx[0] for idx in all_pair_idx], dtype=np.int32)
+            col_j = np.array([idx[1] for idx in all_pair_idx], dtype=np.int32)
+            for start in range(0, n_features, CHUNK):
+                end = min(start + CHUNK, n_features)
+                cooc_counts[start:end] = (
+                    X_np[:, col_i[start:end]] * X_np[:, col_j[start:end]]
+                ).sum(axis=0)
+        else:
+            #General path: numpy per-interaction but without pandas overhead
+            for k in range(n_features):
+                idx = all_pair_idx[k]
+                if len(idx) == 2:
+                    cooc_counts[k] = int((X_np[:, idx[0]] * X_np[:, idx[1]]).sum())
+                else:
+                    cooc_counts[k] = int(X_np[:, idx].prod(axis=1).sum())
+
+        #Filter by min_observed to get qualifying feature indices (preserves
+        #the shuffled order that was set up for downsampling above)
+        qualifying = list(np.where(cooc_counts >= min_observed)[0])
+
+        #Apply downsampling limits to the qualifying list
+        if type(downsample_interactions) == float:
+            limit = int(len(all_features_flat) * downsample_interactions)
+            qualifying = qualifying[:limit]
+        elif type(downsample_interactions) == int:
+            qualifying = qualifying[:downsample_interactions]
+        elif type(downsample_interactions) == dict:
+            per_order_cnt = {}
+            kept = []
+            for k in qualifying:
+                order = orders[k]
+                cnt = per_order_cnt.get(order, 0)
+                lim = downsample_interactions.get(order, -1)
+                if lim == -1 or cnt < lim:
+                    kept.append(k)
+                    per_order_cnt[order] = cnt + 1
+                if per_order_cnt == downsample_interactions:
+                    break
+            qualifying = kept
+
+        #Check memory footprint
+        if len(qualifying) * len(X_np) > max_cells:
+            print(f"Error: Too many interaction terms: number of feature matrix cells >{max_cells:>.0e}")
+            raise ValueError
+
+        retained_features = [features_to_process[i] for i in qualifying]
+        retained_pair_idx = [all_pair_idx[i] for i in qualifying]
+
+        for idx in retained_pair_idx:
+            order = len(idx)
+            int_order_dict_retained[order] = int_order_dict_retained.get(order, 0) + 1
 
         print("... Total retained features (order:count): "+", ".join([str(i)+":"+str(int_order_dict_retained[i])+" ("+str(round(int_order_dict_retained[i]/int_order_dict[i]*100, 1))+"%)" for i in sorted(int_order_dict_retained.keys())]))
 
-        #Concatenate into dataframe
-        if len(int_list)>0:
-            self.Xohi = pd.concat(int_list, axis=1)
-            self.Xohi.columns = int_list_names
-            #Reorder
-            self.Xohi = self.Xohi.loc[:,[i for i in all_features_flat if i in self.Xohi.columns]]
-            self.Xohi = pd.concat([self.Xoh, self.Xohi], axis=1)
+        #Build interaction matrix for retained features only using numpy
+        #(avoids building and pd.concat-ing a per-column list of Series)
+        if retained_features:
+            retained_orders_all_2 = all(len(idx) == 2 for idx in retained_pair_idx)
+            int_chunks = []
+            for start in range(0, len(retained_pair_idx), CHUNK):
+                end = min(start + CHUNK, len(retained_pair_idx))
+                chunk = retained_pair_idx[start:end]
+                if retained_orders_all_2:
+                    ri = np.array([p[0] for p in chunk], dtype=np.int32)
+                    rj = np.array([p[1] for p in chunk], dtype=np.int32)
+                    int_chunks.append((X_np[:, ri] * X_np[:, rj]).astype(np.int8))
+                else:
+                    cols = []
+                    for idx in chunk:
+                        if len(idx) == 2:
+                            cols.append((X_np[:, idx[0]] * X_np[:, idx[1]]).astype(np.int8))
+                        else:
+                            cols.append(X_np[:, idx].prod(axis=1).astype(np.int8))
+                    int_chunks.append(np.column_stack(cols))
+            int_matrix = np.concatenate(int_chunks, axis=1)
+            Xohi_interactions = pd.DataFrame(
+                int_matrix, index=self.Xoh.index, columns=retained_features)
+            #Reorder to match the original all_features_flat ordering
+            reorder_lookup = {c: i for i, c in enumerate(all_features_flat)}
+            ordered_cols = sorted(retained_features, key=lambda c: reorder_lookup[c])
+            Xohi_interactions = Xohi_interactions[ordered_cols]
+            self.Xohi = pd.concat([self.Xoh, Xohi_interactions], axis=1)
         else:
             self.Xohi = copy.deepcopy(self.Xoh)
 

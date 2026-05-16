@@ -30,6 +30,7 @@ class MochiProject():
         downsample_interactions = None,
         max_interaction_order = 1,
         min_observed = 2,
+        max_cells = 1e9,
         k_folds = 10,
         validation_factor = 2, 
         holdout_minobs = 0, 
@@ -71,6 +72,7 @@ class MochiProject():
         :param downsample_interactions: number (if integer) or proportion (if float) of interaction terms to retain (optional).
         :param max_interaction_order: Maximum interaction order (default:1).
         :param min_observed: Minimum number of observations required to include interaction term (default:2).
+        :param max_cells: Maximum permitted size of the interaction feature matrix in cells (n_variants x n_interactions) (default:1e9). Raise on high-memory machines.
         :param k_folds: Numbef of cross-validation folds (default:10).
         :param validation_factor: Relative size of validation set with respect to test set (default:2).
         :param holdout_minobs: Minimum number of observations of additive trait weights to be held out (default:0).
@@ -113,6 +115,7 @@ class MochiProject():
         self.downsample_interactions = downsample_interactions
         self.max_interaction_order = max_interaction_order
         self.min_observed = min_observed
+        self.max_cells = max_cells
         self.k_folds = k_folds
         self.validation_factor = validation_factor
         self.holdout_minobs = holdout_minobs
@@ -401,11 +404,13 @@ class MochiProject():
                         'max_interaction_order' : self.max_interaction_order,
                         'downsample_observations' : self.downsample_observations,
                         'downsample_interactions' : self.downsample_interactions,
+                        'min_observed' : self.min_observed,
+                        'max_cells' : self.max_cells,
                         'k_folds' : self.k_folds,
                         'seed' : self.seed,
-                        'validation_factor' : self.validation_factor, 
-                        'holdout_minobs' : self.holdout_minobs, 
-                        'holdout_orders' : self.holdout_orders, 
+                        'validation_factor' : self.validation_factor,
+                        'holdout_minobs' : self.holdout_minobs,
+                        'holdout_orders' : self.holdout_orders,
                         'holdout_WT' : self.holdout_WT,
                         'features' : features,
                         'ensemble' : self.ensemble,
@@ -466,11 +471,13 @@ class MochiProject():
                         'max_interaction_order' : self.max_interaction_order,
                         'downsample_observations' : self.downsample_observations,
                         'downsample_interactions' : self.downsample_interactions,
+                        'min_observed' : self.min_observed,
+                        'max_cells' : self.max_cells,
                         'k_folds' : self.k_folds,
                         'seed' : seedi,
-                        'validation_factor' : self.validation_factor, 
-                        'holdout_minobs' : self.holdout_minobs, 
-                        'holdout_orders' : self.holdout_orders, 
+                        'validation_factor' : self.validation_factor,
+                        'holdout_minobs' : self.holdout_minobs,
+                        'holdout_orders' : self.holdout_orders,
                         'holdout_WT' : self.holdout_WT,
                         'features' : self.features,
                         'ensemble' : self.ensemble,

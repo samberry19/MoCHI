@@ -321,7 +321,8 @@ class MochiData:
         holdout_WT = False,
         features = {},
         ensemble = False,
-        custom_transformations = None):
+        custom_transformations = None,
+        max_cells = 1e9):
         """
         Initialize a MochiData object.
 
@@ -341,6 +342,7 @@ class MochiData:
         :param features: dictionary of trait-specific feature names to fit (default:{} i.e. all features fit).
         :param ensemble: Ensemble encode features. (default:False).
         :param custom_transformations: Path to custom transformations file (optional).
+        :param max_cells: Maximum permitted size of the interaction feature matrix in cells (n_variants x n_interactions) (default:1e9). Raise this on high-memory machines to allow more interaction terms.
         :returns: MochiData object.
         """
         #Save attributes
@@ -351,6 +353,7 @@ class MochiData:
         self.downsample_interactions = downsample_interactions
         self.max_interaction_order = max_interaction_order
         self.min_observed = min_observed
+        self.max_cells = max_cells
         self.k_folds = k_folds
         self.seed = seed
         self.validation_factor = validation_factor
@@ -420,7 +423,8 @@ class MochiData:
             min_observed = self.min_observed,
             features = self.features,
             downsample_interactions = self.downsample_interactions,
-            seed = self.seed)
+            seed = self.seed,
+            max_cells = self.max_cells)
         # self.one_hot_encode_interactions_todisk(
         #     max_order = self.max_interaction_order,
         #     min_observed = self.min_observed,
@@ -1067,9 +1071,11 @@ class MochiData:
                     break
             qualifying = kept
 
-        #Check memory footprint
-        if len(qualifying) * len(X_np) > max_cells:
-            print(f"Error: Too many interaction terms: number of feature matrix cells >{max_cells:>.0e}")
+        #Check memory footprint (n_retained_interactions * n_variants)
+        n_retained = len(qualifying)
+        n_variants = len(X_np)
+        if n_retained * n_variants > max_cells:
+            print(f"Error: Interaction feature matrix too large: {n_retained} retained interactions x {n_variants} variants = {n_retained*n_variants:.2e} cells (limit: {max_cells:.0e}). Raise max_cells, increase min_observed, or use downsample_interactions to reduce the number of interaction terms.")
             raise ValueError
 
         retained_features = [features_to_process[i] for i in qualifying]

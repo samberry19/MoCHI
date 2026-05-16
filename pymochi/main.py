@@ -37,6 +37,7 @@ def init_argparse(
     parser.add_argument('--downsample_interactions', help = "number (if integer) or proportion (if float) or list of integer numbers (if string) of interaction terms to retain (default: no downsampling)")
     parser.add_argument('--max_interaction_order', type = int, default = 1, help = "maximum interaction order (default: 1)")
     parser.add_argument('--min_observed', type = int, default = 2, help = "minimum number of observations required to include interaction term (default:2)")
+    parser.add_argument('--max_cells', type = float, default = 1e9, help = "maximum size of the interaction feature matrix in cells (n_variants x n_interactions); raise on high-memory machines (default:1e9)")
     parser.add_argument('--k_folds', type = int, default = 10, help = "number of cross-validation folds where test set%% = 100/k_folds (default: 10)")
     parser.add_argument('--validation_factor', type = int, default = 2, help = "validation factor where validation set%% = 100/k_folds*validation_factor (default: 2 i.e. 20%%)")
     parser.add_argument('--holdout_minobs', type = int, default = 0, help = "minimum number of observations of additive trait weights to be held out (default: 0)")
@@ -128,6 +129,7 @@ def main(
         downsample_interactions = args.downsample_interactions,
         max_interaction_order = args.max_interaction_order,
         min_observed = args.min_observed,
+        max_cells = args.max_cells,
         k_folds = args.k_folds,
         validation_factor = args.validation_factor, 
         holdout_minobs = args.holdout_minobs, 

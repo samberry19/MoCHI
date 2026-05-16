@@ -46,13 +46,14 @@ class MochiModel(torch.nn.Module):
     A custom model/module.
     """
     def __init__(
-        self, 
-        input_shape, 
-        mask, 
+        self,
+        input_shape,
+        mask,
         model_design,
         custom_transformations,
         sos_architecture,
-        sos_outputlinear):
+        sos_outputlinear,
+        feature_names=None):
         """
         Initialize a MochiModel object.
 
@@ -62,9 +63,14 @@ class MochiModel(torch.nn.Module):
         :param custom_transformations: dictionary of custom transformations where keys are function names and values are functions (required).
         :param sos_architecture: list of integers corresponding to number of neurons per fully-connected sumOfSigmoids hidden layer (required).
         :param sos_outputlinear: boolean indicating whether final sumOfSigmoids should be linear rather than sigmoidal (required).
+        :param feature_names: list of feature column names used to identify where 2nd-order interaction weights begin (optional).
         :returns: MochiModel object.
-        """     
+        """
         super(MochiModel, self).__init__()
+        #Index of first 2nd-order interaction weight (names containing '_'); None disables split
+        self.interaction_start_idx = (
+            sum(1 for n in feature_names if '_' not in n)
+            if feature_names is not None else None)
         #Model design
         self.model_design = model_design
         #Custom transformations
@@ -218,40 +224,44 @@ class MochiModel(torch.nn.Module):
                 data[k]["y_wt"], batch_size=batch_size, shuffle=True))
         return tuple(dataloader_list)
 
-    def calculate_l1l2_norm(self):      
+    def calculate_l1l2_norm(self):
         """
-        Calculate L1 and L2 norm of additive trait parameters (excluding WT).
+        Calculate L1 and L2 norms of additive trait parameters (excluding WT),
+        split into 1st-order and 2nd-order interaction terms when
+        interaction_start_idx is set.
 
-        :returns: Tuple of L2 an L2 norms.
-        """ 
+        :returns: 4-tuple (l1_main, l2_main, l1_interactions, l2_interactions).
+                  When no split is configured, interaction terms are zero tensors.
+        """
         #Get weights for all additive traits
         additivetrait_parameters = [i.parameters() for i in self.additivetraits]
         #Unlist additive trait weights
         additivetrait_parameters = [item for sublist in additivetrait_parameters for item in sublist]
-        l1_norm = sum(p[0][1:].abs().sum() for p in additivetrait_parameters)
-        l2_norm = sum(p[0][1:].pow(2.0).sum() for p in additivetrait_parameters)
-
-        # #Get weights for all sigmoidal layers
-        # sigmoid_parameters = [
-        #     [i.parameters() for i in self.sumofsigmoids1],
-        #     [i.parameters() for i in self.sumofsigmoids2],
-        #     [i.parameters() for i in self.sumofsigmoids3],
-        #     [i.parameters() for i in self.sumofsigmoids4]]
-        # sigmoid_parameters = [item for sublist in sigmoid_parameters for item in sublist]
-        # sigmoid_parameters = [item for sublist in sigmoid_parameters for item in sublist]
-        # l1_norm += sum(p.abs().sum() for p in sigmoid_parameters)*100
-        # l2_norm += sum(p.pow(2.0).sum() for p in sigmoid_parameters)*100
-
-        return (l1_norm, l2_norm)
+        idx = self.interaction_start_idx
+        if idx is not None:
+            #1st-order terms: weights[1:idx]; 2nd-order terms: weights[idx:]
+            l1_main = sum(p[0][1:idx].abs().sum() for p in additivetrait_parameters)
+            l2_main = sum(p[0][1:idx].pow(2.0).sum() for p in additivetrait_parameters)
+            l1_int  = sum(p[0][idx:].abs().sum() for p in additivetrait_parameters)
+            l2_int  = sum(p[0][idx:].pow(2.0).sum() for p in additivetrait_parameters)
+        else:
+            #Original behaviour: all non-WT weights in one group
+            l1_main = sum(p[0][1:].abs().sum() for p in additivetrait_parameters)
+            l2_main = sum(p[0][1:].pow(2.0).sum() for p in additivetrait_parameters)
+            l1_int  = torch.tensor(0.0)
+            l2_int  = torch.tensor(0.0)
+        return (l1_main, l2_main, l1_int, l2_int)
 
     def train_model(
-        self, 
-        dataloader, 
-        loss_function, 
-        optimizer, 
-        device, 
-        l1_lambda = 0, 
-        l2_lambda = 0):
+        self,
+        dataloader,
+        loss_function,
+        optimizer,
+        device,
+        l1_lambda=0,
+        l2_lambda=0,
+        l1_lambda_interactions=None,
+        l2_lambda_interactions=None):
         """
         Train model.
 
@@ -259,10 +269,14 @@ class MochiModel(torch.nn.Module):
         :param loss_function: Loss function (required).
         :param optimizer: Optimizer (required).
         :param device: cpu or cuda (required).
-        :param l1_lambda: Lambda factor applied to L1 norm (default:0).
-        :param l2_lambda: Lambda factor applied to L2 norm (default:0).
+        :param l1_lambda: Lambda factor applied to L1 norm of 1st-order weights (default:0).
+        :param l2_lambda: Lambda factor applied to L2 norm of 1st-order weights (default:0).
+        :param l1_lambda_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_lambda).
+        :param l2_lambda_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_lambda).
         :returns: Nothing.
-        """ 
+        """
+        l1_int_lam = l1_lambda_interactions if l1_lambda_interactions is not None else l1_lambda
+        l2_int_lam = l2_lambda_interactions if l2_lambda_interactions is not None else l2_lambda
         size = dataloader.dataset_len
         self.train()
         batch = 0
@@ -271,35 +285,42 @@ class MochiModel(torch.nn.Module):
             batch += 1
             select, X, y, y_wt = select.to(device), X.to(device), y.to(device), y_wt.to(device)
             # Regularisation of additive trait parameters (excluding WT)
-            l1_norm, l2_norm = self.calculate_l1l2_norm()
+            l1_main, l2_main, l1_int, l2_int = self.calculate_l1l2_norm()
             # Compute prediction error (weighted by measurement error) + regularization terms
             pred = self(select, X, mask)
-            loss = sum(loss_function(pred, y, y_wt))/len(y) + l1_lambda * l1_norm + l2_lambda * l2_norm
+            loss = (sum(loss_function(pred, y, y_wt))/len(y)
+                    + l1_lambda * l1_main + l2_lambda * l2_main
+                    + l1_int_lam * l1_int + l2_int_lam * l2_int)
             # Backpropagation
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
   
     def validate_model(
-        self, 
-        dataloader, 
-        loss_function, 
-        device, 
-        l1_lambda = 0, 
-        l2_lambda = 0, 
-        data_WT = None):
+        self,
+        dataloader,
+        loss_function,
+        device,
+        l1_lambda=0,
+        l2_lambda=0,
+        data_WT=None,
+        l1_lambda_interactions=None,
+        l2_lambda_interactions=None):
         """
         Validate model.
 
         :param dataloader: Dataloader (required).
         :param loss_function: Loss function (required).
-        :param optimizer: Optimizer (required).
         :param device: cpu or cuda (required).
-        :param l1_lambda: Lambda factor applied to L1 norm (default:0).
-        :param l2_lambda: Lambda factor applied to L2 norm (default:0).
-        :param data_WT: Dictionary of tensors corresponding to WT sequences only (default:0).
+        :param l1_lambda: Lambda factor applied to L1 norm of 1st-order weights (default:0).
+        :param l2_lambda: Lambda factor applied to L2 norm of 1st-order weights (default:0).
+        :param data_WT: Dictionary of tensors corresponding to WT sequences only (default:None).
+        :param l1_lambda_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_lambda).
+        :param l2_lambda_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_lambda).
         :returns: Nothing.
-        """ 
+        """
+        l1_int_lam = l1_lambda_interactions if l1_lambda_interactions is not None else l1_lambda
+        l2_int_lam = l2_lambda_interactions if l2_lambda_interactions is not None else l2_lambda
         size = dataloader.dataset_len
         num_batches = len(dataloader)
         self.eval()
@@ -310,10 +331,12 @@ class MochiModel(torch.nn.Module):
             for select, X, y, y_wt in dataloader:
                 select, X, y, y_wt = select.to(device), X.to(device), y.to(device), y_wt.to(device)
                 # Regularisation of additive trait parameters (excluding WT)
-                l1_norm, l2_norm = self.calculate_l1l2_norm()
+                l1_main, l2_main, l1_int, l2_int = self.calculate_l1l2_norm()
                 # Compute prediction error (weighted by measurement error) + regularization terms
                 pred = self(select, X, mask)
-                val_loss += (sum(loss_function(pred, y, y_wt))/len(y) + l1_lambda * l1_norm + l2_lambda * l2_norm).item()
+                val_loss += (sum(loss_function(pred, y, y_wt))/len(y)
+                             + l1_lambda * l1_main + l2_lambda * l2_main
+                             + l1_int_lam * l1_int + l2_int_lam * l2_int).item()
             #Training history - WT residuals
             if data_WT!=None:
                 select_WT, X_WT, y_WT = data_WT['select'].to(device), data_WT['X'].to(device), data_WT['y'].to(device)
@@ -368,7 +391,9 @@ class MochiModelMetadata():
         scheduler_epochs,
         loss_function_name,
         sos_architecture,
-        sos_outputlinear):
+        sos_outputlinear,
+        l1_regularization_factor_interactions=None,
+        l2_regularization_factor_interactions=None):
         """
         Initialize a MochiModelMetadata object.
 
@@ -379,8 +404,8 @@ class MochiModelMetadata():
         :param learn_rate: Learning rate (required).
         :param num_epochs: Number of training epochs (required).
         :param num_epochs_grid: Number of grid search epochs (required).
-        :param l1_regularization_factor: Lambda factor applied to L1 norm (required).
-        :param l2_regularization_factor: Lambda factor applied to L2 norm (required).
+        :param l1_regularization_factor: Lambda factor applied to L1 norm of 1st-order weights (required).
+        :param l2_regularization_factor: Lambda factor applied to L2 norm of 1st-order weights (required).
         :param training_resample: Whether or not to add random noise to training target data proportional to target error (required).
         :param early_stopping: Whether or not to stop training early if validation loss not decreasing (required).
         :param scheduler_gamma: Multiplicative factor of learning rate decay (required).
@@ -388,8 +413,10 @@ class MochiModelMetadata():
         :param loss_function_name: Loss function name (required).
         :param sos_architecture: list of integers corresponding to number of neurons per fully-connected sumOfSigmoids hidden layer (required).
         :param sos_outputlinear: boolean indicating whether final sumOfSigmoids should be linear rather than sigmoidal (required).
+        :param l1_regularization_factor_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_regularization_factor).
+        :param l2_regularization_factor_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_regularization_factor).
         :returns: MochiModelMetadata object.
-        """ 
+        """
         self.fold = fold
         self.seed = seed
         self.grid_search = grid_search
@@ -399,6 +426,8 @@ class MochiModelMetadata():
         self.num_epochs_grid = num_epochs_grid
         self.l1_regularization_factor = l1_regularization_factor
         self.l2_regularization_factor = l2_regularization_factor
+        self.l1_regularization_factor_interactions = l1_regularization_factor_interactions
+        self.l2_regularization_factor_interactions = l2_regularization_factor_interactions
         self.training_resample = training_resample
         self.early_stopping = early_stopping
         self.scheduler_gamma = scheduler_gamma
@@ -420,21 +449,23 @@ class MochiTask():
     A class for the storage and management of models and data related to a specific inference task.
     """
     def __init__(
-        self, 
+        self,
         directory,
-        data = None,
-        batch_size = 512,
-        learn_rate = 0.05,
-        num_epochs = 1000,
-        num_epochs_grid = 100,
-        l1_regularization_factor = 0,
-        l2_regularization_factor = 0,
-        training_resample = True,
-        early_stopping = True,
-        scheduler_gamma = 0.98,
-        loss_function_name = 'WeightedL1',
-        sos_architecture = [20],
-        sos_outputlinear = False):
+        data=None,
+        batch_size=512,
+        learn_rate=0.05,
+        num_epochs=1000,
+        num_epochs_grid=100,
+        l1_regularization_factor=0,
+        l2_regularization_factor=0,
+        training_resample=True,
+        early_stopping=True,
+        scheduler_gamma=0.98,
+        loss_function_name='WeightedL1',
+        sos_architecture=[20],
+        sos_outputlinear=False,
+        l1_regularization_factor_interactions=None,
+        l2_regularization_factor_interactions=None):
         """
         Initialize a MochiTask object.
 
@@ -444,16 +475,18 @@ class MochiTask():
         :param learn_rate: Learning rate (default:0.05).
         :param num_epochs: Number of training epochs (default:1000).
         :param num_epochs_grid: Number of grid search epochs (default:100).
-        :param l1_regularization_factor: Lambda factor applied to L1 norm (default:0).
-        :param l2_regularization_factor: Lambda factor applied to L2 norm (default:0).
+        :param l1_regularization_factor: Lambda factor applied to L1 norm of 1st-order weights (default:0).
+        :param l2_regularization_factor: Lambda factor applied to L2 norm of 1st-order weights (default:0).
         :param training_resample: Whether or not to add random noise to training target data proportional to target error (default:True).
         :param early_stopping: Whether or not to stop training early if validation loss not decreasing (default:True).
         :param scheduler_gamma: Multiplicative factor of learning rate decay (default:0.98).
         :param loss_function_name: Loss function name (default:'WeightedL1').
         :param sos_architecture: list of integers corresponding to number of neurons per fully-connected sumOfSigmoids hidden layer (default:[20]).
         :param sos_outputlinear: boolean indicating whether final sumOfSigmoids should be linear rather than sigmoidal (default:False).
+        :param l1_regularization_factor_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_regularization_factor).
+        :param l2_regularization_factor_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_regularization_factor).
         :returns: MochiTask object.
-        """ 
+        """
         #Get CPU or GPU device
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         # print(f"Using {self.device} device")
@@ -475,6 +508,8 @@ class MochiTask():
             self.num_epochs_grid = num_epochs_grid
             self.l1_regularization_factor = [float(i) for i in str(l1_regularization_factor).split(",")]
             self.l2_regularization_factor = [float(i) for i in str(l2_regularization_factor).split(",")]
+            self.l1_regularization_factor_interactions = float(l1_regularization_factor_interactions) if l1_regularization_factor_interactions is not None else None
+            self.l2_regularization_factor_interactions = float(l2_regularization_factor_interactions) if l2_regularization_factor_interactions is not None else None
             self.training_resample = training_resample
             self.early_stopping = early_stopping
             self.scheduler_gamma = scheduler_gamma
@@ -611,7 +646,8 @@ class MochiTask():
             model_design = self.data.model_design,
             custom_transformations = self.data.custom_transformations,
             sos_architecture = self.sos_architecture,
-            sos_outputlinear = self.sos_outputlinear).to(self.device)
+            sos_outputlinear = self.sos_outputlinear,
+            feature_names = list(self.data.feature_names)).to(self.device)
         return model
 
     def wavg(
@@ -1063,7 +1099,9 @@ class MochiTask():
                     sos_architecture = self.sos_architecture,
                     sos_outputlinear = self.sos_outputlinear,
                     init_weights = init_weights,
-                    fix_weights = fix_weights)
+                    fix_weights = fix_weights,
+                    l1_regularization_factor_interactions = getattr(self, 'l1_regularization_factor_interactions', None),
+                    l2_regularization_factor_interactions = getattr(self, 'l2_regularization_factor_interactions', None))
         except ValueError:
             print("Error: Grid search failed.")
             raise ValueError
@@ -1158,7 +1196,9 @@ class MochiTask():
             sos_architecture = self.sos_architecture,
             sos_outputlinear = self.sos_outputlinear,
             init_weights = init_weights,
-            fix_weights = fix_weights)
+            fix_weights = fix_weights,
+            l1_regularization_factor_interactions = getattr(self, 'l1_regularization_factor_interactions', None),
+            l2_regularization_factor_interactions = getattr(self, 'l2_regularization_factor_interactions', None))
 
     def weights_init_task(
         self,
@@ -1332,26 +1372,28 @@ class MochiTask():
                 model_addt[model_ti].requires_grad_(False)
 
     def fit(
-        self, 
-        fold = 1,
-        seed = 1,
-        grid_search = False,
-        batch_size = 512,
-        learn_rate = 0.05,
-        num_epochs = 300,
-        num_epochs_grid = 100,
-        l1_regularization_factor = 0,
-        l2_regularization_factor = 0,
-        epoch_status = 10,
-        training_resample = True,
-        early_stopping = True,
-        scheduler_gamma = 0.98,
-        scheduler_epochs = 10,
-        loss_function_name = 'WeightedL1',
-        sos_architecture = [20],
-        sos_outputlinear = False,
-        init_weights = None,
-        fix_weights = {}):
+        self,
+        fold=1,
+        seed=1,
+        grid_search=False,
+        batch_size=512,
+        learn_rate=0.05,
+        num_epochs=300,
+        num_epochs_grid=100,
+        l1_regularization_factor=0,
+        l2_regularization_factor=0,
+        epoch_status=10,
+        training_resample=True,
+        early_stopping=True,
+        scheduler_gamma=0.98,
+        scheduler_epochs=10,
+        loss_function_name='WeightedL1',
+        sos_architecture=[20],
+        sos_outputlinear=False,
+        init_weights=None,
+        fix_weights={},
+        l1_regularization_factor_interactions=None,
+        l2_regularization_factor_interactions=None):
         """
         Fit model.
 
@@ -1362,8 +1404,8 @@ class MochiTask():
         :param learn_rate: Learning rate (default:0.05).
         :param num_epochs: Number of training epochs (default:300).
         :param num_epochs_grid: Number of grid search epochs (default:100).
-        :param l1_regularization_factor: Lambda factor applied to L1 norm (default:0).
-        :param l2_regularization_factor: Lambda factor applied to L2 norm (default:0).
+        :param l1_regularization_factor: Lambda factor applied to L1 norm of 1st-order weights (default:0).
+        :param l2_regularization_factor: Lambda factor applied to L2 norm of 1st-order weights (default:0).
         :param epoch_status: Number of training epochs after which to print status messages (default:10).
         :param training_resample: Whether or not to add random noise to training target data proportional to target error (default:True).
         :param early_stopping: Whether or not to stop training early if validation loss not decreasing (default:True).
@@ -1374,8 +1416,10 @@ class MochiTask():
         :param sos_outputlinear: boolean indicating whether final sumOfSigmoids should be linear rather than sigmoidal (default:False).
         :param init_weights: Task to use for model weight initialization (optional).
         :param fix_weights: Dictionary of layer names to fix weights (default:empty dict i.e. no layers fixed).
+        :param l1_regularization_factor_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_regularization_factor).
+        :param l2_regularization_factor_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_regularization_factor).
         :returns: Nothing.
-        """ 
+        """
 
         #Check if valid MochiTask
         if 'models' not in dir(self):
@@ -1443,7 +1487,9 @@ class MochiTask():
             scheduler_epochs = scheduler_epochs,
             loss_function_name = loss_function_name,
             sos_architecture = sos_architecture,
-            sos_outputlinear = sos_outputlinear)
+            sos_outputlinear = sos_outputlinear,
+            l1_regularization_factor_interactions = l1_regularization_factor_interactions,
+            l2_regularization_factor_interactions = l2_regularization_factor_interactions)
         print("Fitting model:")
         print(model.metadata)
 
@@ -1466,19 +1512,23 @@ class MochiTask():
             total_epochs = num_epochs_grid
         for epoch in range(total_epochs):
             model.train_model(
-                train_dataloader, 
-                loss_function, 
+                train_dataloader,
+                loss_function,
                 optimizer,
-                self.device, 
-                l1_regularization_factor, 
-                l2_regularization_factor)
+                self.device,
+                l1_regularization_factor,
+                l2_regularization_factor,
+                l1_lambda_interactions=l1_regularization_factor_interactions,
+                l2_lambda_interactions=l2_regularization_factor_interactions)
             model.validate_model(
-                valid_dataloader, 
-                loss_function, 
-                self.device, 
-                l1_regularization_factor, 
-                l2_regularization_factor, 
-                model_data_WT)
+                valid_dataloader,
+                loss_function,
+                self.device,
+                l1_regularization_factor,
+                l2_regularization_factor,
+                model_data_WT,
+                l1_lambda_interactions=l1_regularization_factor_interactions,
+                l2_lambda_interactions=l2_regularization_factor_interactions)
 
             #Check scheduler and early-stopping criteria
             if epoch >= (2*scheduler_epochs):

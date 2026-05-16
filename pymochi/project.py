@@ -51,6 +51,8 @@ class MochiProject():
         loss_function_name = 'WeightedL1',
         sos_architecture = [20],
         sos_outputlinear = False,
+        l1_regularization_factor_interactions = None,
+        l2_regularization_factor_interactions = None,
         init_weights_directory = None,
         init_weights_task_id = 1,
         fix_weights = {},
@@ -81,8 +83,10 @@ class MochiProject():
         :param learn_rate: Learning rate (default:0.05).
         :param num_epochs: Number of training epochs (default:300).
         :param num_epochs_grid: Number of grid search epochs (default:100).
-        :param l1_regularization_factor: Lambda factor applied to L1 norm (default:0).
-        :param l2_regularization_factor: Lambda factor applied to L2 norm (default:0.000001).
+        :param l1_regularization_factor: Lambda factor applied to L1 norm of 1st-order weights (default:0).
+        :param l2_regularization_factor: Lambda factor applied to L2 norm of 1st-order weights (default:0.000001).
+        :param l1_regularization_factor_interactions: Lambda for L1 norm of 2nd-order interaction weights (default:None i.e. same as l1_regularization_factor).
+        :param l2_regularization_factor_interactions: Lambda for L2 norm of 2nd-order interaction weights (default:None i.e. same as l2_regularization_factor).
         :param training_resample: Whether or not to add random noise to training target data proportional to target error (default:True).
         :param early_stopping: Whether or not to stop training early if validation loss not decreasing (default:True).
         :param scheduler_gamma: Multiplicative factor of learning rate decay (default:0.98).
@@ -124,6 +128,8 @@ class MochiProject():
         self.num_epochs_grid = num_epochs_grid
         self.l1_regularization_factor = l1_regularization_factor
         self.l2_regularization_factor = l2_regularization_factor
+        self.l1_regularization_factor_interactions = l1_regularization_factor_interactions
+        self.l2_regularization_factor_interactions = l2_regularization_factor_interactions
         self.training_resample = training_resample
         self.early_stopping = early_stopping
         self.scheduler_gamma = scheduler_gamma
@@ -477,6 +483,8 @@ class MochiProject():
                         'num_epochs_grid' : self.num_epochs_grid,
                         'l1_regularization_factor' : self.l1_regularization_factor,
                         'l2_regularization_factor' : self.l2_regularization_factor,
+                        'l1_regularization_factor_interactions' : self.l1_regularization_factor_interactions,
+                        'l2_regularization_factor_interactions' : self.l2_regularization_factor_interactions,
                         'training_resample' : self.training_resample,
                         'early_stopping' : self.early_stopping,
                         'scheduler_gamma' : self.scheduler_gamma,

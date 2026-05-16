@@ -50,8 +50,10 @@ def init_argparse(
     parser.add_argument('--learn_rate', default = 0.05, help = "comma-separated list of learning rates to consider during grid search (default: 0.05)")
     parser.add_argument('--num_epochs', type = int, default = 1000, help = "maximum number of training epochs (default: 1000)")
     parser.add_argument('--num_epochs_grid', type = int, default = 100, help = "number of grid search epochs (default: 100)")
-    parser.add_argument('--l1_regularization_factor', default = 0, help = "lambda factor applied to L1 norm (default: 0)")
-    parser.add_argument('--l2_regularization_factor', default = 0.000001, help = "lambda factor applied to L2 norm (default: 0.000001)")
+    parser.add_argument('--l1_regularization_factor', default = 0, help = "lambda factor applied to L1 norm of 1st-order weights (default: 0)")
+    parser.add_argument('--l2_regularization_factor', default = 0.000001, help = "lambda factor applied to L2 norm of 1st-order weights (default: 0.000001)")
+    parser.add_argument('--l1_regularization_factor_interactions', default = None, help = "lambda factor applied to L1 norm of 2nd-order interaction weights (default: same as l1_regularization_factor)")
+    parser.add_argument('--l2_regularization_factor_interactions', default = None, help = "lambda factor applied to L2 norm of 2nd-order interaction weights (default: same as l2_regularization_factor)")
     parser.add_argument('--training_resample', default = True, help = "whether or not to add random noise to training target data proportional to target error (default:True)")
     parser.add_argument('--early_stopping', default = True, help = "whether or not to stop training early if validation loss not decreasing (default:True)")
     parser.add_argument('--scheduler_gamma', type = float, default = 0.98, help = "multiplicative factor of learning rate decay (default:0.98)")
@@ -140,6 +142,8 @@ def main(
         num_epochs_grid = args.num_epochs_grid,
         l1_regularization_factor = args.l1_regularization_factor,
         l2_regularization_factor = args.l2_regularization_factor,
+        l1_regularization_factor_interactions = args.l1_regularization_factor_interactions,
+        l2_regularization_factor_interactions = args.l2_regularization_factor_interactions,
         training_resample = args.training_resample,
         early_stopping = args.early_stopping,
         scheduler_gamma = args.scheduler_gamma,

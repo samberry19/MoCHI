@@ -508,8 +508,8 @@ class MochiTask():
             self.num_epochs_grid = num_epochs_grid
             self.l1_regularization_factor = [float(i) for i in str(l1_regularization_factor).split(",")]
             self.l2_regularization_factor = [float(i) for i in str(l2_regularization_factor).split(",")]
-            self.l1_regularization_factor_interactions = float(l1_regularization_factor_interactions) if l1_regularization_factor_interactions is not None else None
-            self.l2_regularization_factor_interactions = float(l2_regularization_factor_interactions) if l2_regularization_factor_interactions is not None else None
+            self.l1_regularization_factor_interactions = [float(i) for i in str(l1_regularization_factor_interactions).split(",")] if l1_regularization_factor_interactions is not None else [None]
+            self.l2_regularization_factor_interactions = [float(i) for i in str(l2_regularization_factor_interactions).split(",")] if l2_regularization_factor_interactions is not None else [None]
             self.training_resample = training_resample
             self.early_stopping = early_stopping
             self.scheduler_gamma = scheduler_gamma
@@ -1078,7 +1078,9 @@ class MochiTask():
             self.batch_size,
             self.learn_rate,
             self.l1_regularization_factor,
-            self.l2_regularization_factor))
+            self.l2_regularization_factor,
+            getattr(self, 'l1_regularization_factor_interactions', [None]),
+            getattr(self, 'l2_regularization_factor_interactions', [None])))
         #Fit one model for each hyperparameter combination
         try:
             for b in batch_params:
@@ -1100,8 +1102,8 @@ class MochiTask():
                     sos_outputlinear = self.sos_outputlinear,
                     init_weights = init_weights,
                     fix_weights = fix_weights,
-                    l1_regularization_factor_interactions = getattr(self, 'l1_regularization_factor_interactions', None),
-                    l2_regularization_factor_interactions = getattr(self, 'l2_regularization_factor_interactions', None))
+                    l1_regularization_factor_interactions = b[4],
+                    l2_regularization_factor_interactions = b[5])
         except ValueError:
             print("Error: Grid search failed.")
             raise ValueError
@@ -1197,8 +1199,8 @@ class MochiTask():
             sos_outputlinear = self.sos_outputlinear,
             init_weights = init_weights,
             fix_weights = fix_weights,
-            l1_regularization_factor_interactions = getattr(self, 'l1_regularization_factor_interactions', None),
-            l2_regularization_factor_interactions = getattr(self, 'l2_regularization_factor_interactions', None))
+            l1_regularization_factor_interactions = getattr(grid_search_models[best_model_index].metadata, 'l1_regularization_factor_interactions', None),
+            l2_regularization_factor_interactions = getattr(grid_search_models[best_model_index].metadata, 'l2_regularization_factor_interactions', None))
 
     def weights_init_task(
         self,

@@ -943,13 +943,16 @@ class MochiData:
 
         #Check if no interactions to add
         if max_order<2:
-            self.Xohi = copy.deepcopy(self.Xoh)
-            #Filter features
-            if features!=[]:
+            if features != []:
+                self.Xohi = copy.deepcopy(self.Xoh)
                 print("Filtering features")
-                self.Xohi = self.filter_features(
-                    input_df = self.Xohi,
-                    features = features)
+                self.Xohi = self.filter_features(input_df=self.Xohi, features=features)
+                self._interaction_col_pairs = None
+            else:
+                self.Xohi = self.Xoh
+                self._interaction_col_pairs = np.empty((0, 2), dtype=np.int32)
+            self._interaction_feature_names = []
+            self.feature_names = self.Xohi.columns
             return
 
         #Check downsample_interactions argument valid
@@ -1014,10 +1017,15 @@ class MochiData:
         int_order_dict_retained = {}
 
         if n_features == 0:
-            self.Xohi = copy.deepcopy(self.Xoh)
             if features != []:
+                self.Xohi = copy.deepcopy(self.Xoh)
                 print("Filtering features")
                 self.Xohi = self.filter_features(input_df=self.Xohi, features=features)
+                self._interaction_col_pairs = None   # use old materialized path in get_data()
+            else:
+                self.Xohi = self.Xoh
+                self._interaction_col_pairs = np.empty((0, 2), dtype=np.int32)
+            self._interaction_feature_names = []
             self.feature_names = self.Xohi.columns
             return
 
@@ -1071,15 +1079,18 @@ class MochiData:
                     break
             qualifying = kept
 
-        #Check memory footprint (n_retained_interactions * n_variants)
-        n_retained = len(qualifying)
-        n_variants = len(X_np)
-        if n_retained * n_variants > max_cells:
-            print(f"Error: Interaction feature matrix too large: {n_retained} retained interactions x {n_variants} variants = {n_retained*n_variants:.2e} cells (limit: {max_cells:.0e}). Raise max_cells, increase min_observed, or use downsample_interactions to reduce the number of interaction terms.")
-            raise ValueError
-
         retained_features = [features_to_process[i] for i in qualifying]
         retained_pair_idx = [all_pair_idx[i] for i in qualifying]
+
+        #Check memory footprint only when the matrix will be materialised (features filter or mixed orders)
+        will_materialise = (features != []) or (
+            len(set(len(idx) for idx in retained_pair_idx)) > 1 if retained_pair_idx else False)
+        if will_materialise:
+            n_retained = len(qualifying)
+            n_variants = len(X_np)
+            if n_retained * n_variants > max_cells:
+                print(f"Error: Interaction feature matrix too large: {n_retained} retained interactions x {n_variants} variants = {n_retained*n_variants:.2e} cells (limit: {max_cells:.0e}). Raise max_cells, increase min_observed, or use downsample_interactions to reduce the number of interaction terms.")
+                raise ValueError
 
         for idx in retained_pair_idx:
             order = len(idx)
@@ -1087,46 +1098,87 @@ class MochiData:
 
         print("... Total retained features (order:count): "+", ".join([str(i)+":"+str(int_order_dict_retained[i])+" ("+str(round(int_order_dict_retained[i]/int_order_dict[i]*100, 1))+"%)" for i in sorted(int_order_dict_retained.keys())]))
 
-        #Build interaction matrix for retained features only using numpy
-        #(avoids building and pd.concat-ing a per-column list of Series)
-        if retained_features:
-            retained_orders_all_2 = all(len(idx) == 2 for idx in retained_pair_idx)
-            int_chunks = []
-            for start in range(0, len(retained_pair_idx), CHUNK):
-                end = min(start + CHUNK, len(retained_pair_idx))
-                chunk = retained_pair_idx[start:end]
-                if retained_orders_all_2:
-                    ri = np.array([p[0] for p in chunk], dtype=np.int32)
-                    rj = np.array([p[1] for p in chunk], dtype=np.int32)
-                    int_chunks.append((X_np[:, ri] * X_np[:, rj]).astype(np.int8))
-                else:
-                    cols = []
-                    for idx in chunk:
-                        if len(idx) == 2:
-                            cols.append((X_np[:, idx[0]] * X_np[:, idx[1]]).astype(np.int8))
-                        else:
-                            cols.append(X_np[:, idx].prod(axis=1).astype(np.int8))
-                    int_chunks.append(np.column_stack(cols))
-            int_matrix = np.concatenate(int_chunks, axis=1)
-            Xohi_interactions = pd.DataFrame(
-                int_matrix, index=self.Xoh.index, columns=retained_features)
-            #Reorder to match the original all_features_flat ordering
-            reorder_lookup = {c: i for i, c in enumerate(all_features_flat)}
-            ordered_cols = sorted(retained_features, key=lambda c: reorder_lookup[c])
-            Xohi_interactions = Xohi_interactions[ordered_cols]
-            self.Xohi = pd.concat([self.Xoh, Xohi_interactions], axis=1)
-        else:
-            self.Xohi = copy.deepcopy(self.Xoh)
-
-        #Filter features
-        if features!=[]:
+        if features != []:
+            #Materialise the interaction matrix so filter_features can be applied (features filter is an advanced/rare use)
+            if retained_features:
+                retained_orders_all_2 = all(len(idx) == 2 for idx in retained_pair_idx)
+                int_chunks = []
+                for start in range(0, len(retained_pair_idx), CHUNK):
+                    end = min(start + CHUNK, len(retained_pair_idx))
+                    chunk = retained_pair_idx[start:end]
+                    if retained_orders_all_2:
+                        ri = np.array([p[0] for p in chunk], dtype=np.int32)
+                        rj = np.array([p[1] for p in chunk], dtype=np.int32)
+                        int_chunks.append((X_np[:, ri] * X_np[:, rj]).astype(np.int8))
+                    else:
+                        cols = []
+                        for idx in chunk:
+                            if len(idx) == 2:
+                                cols.append((X_np[:, idx[0]] * X_np[:, idx[1]]).astype(np.int8))
+                            else:
+                                cols.append(X_np[:, idx].prod(axis=1).astype(np.int8))
+                        int_chunks.append(np.column_stack(cols))
+                int_matrix = np.concatenate(int_chunks, axis=1)
+                Xohi_interactions = pd.DataFrame(
+                    int_matrix, index=self.Xoh.index, columns=retained_features)
+                reorder_lookup = {c: i for i, c in enumerate(all_features_flat)}
+                ordered_cols = sorted(retained_features, key=lambda c: reorder_lookup[c])
+                Xohi_interactions = Xohi_interactions[ordered_cols]
+                self.Xohi = pd.concat([self.Xoh, Xohi_interactions], axis=1)
+            else:
+                self.Xohi = copy.deepcopy(self.Xoh)
             print("Filtering features")
-            self.Xohi = self.filter_features(
-                input_df = self.Xohi,
-                features = features)
+            self.Xohi = self.filter_features(input_df=self.Xohi, features=features)
+            self._interaction_col_pairs = None   # signal to use materialized Xohi in get_data()
+            self._interaction_feature_names = []
+        else:
+            #On-the-fly path: store column-index pairs only; never materialise the full matrix.
+            #Requires all retained interactions to have the same order (true for max_interaction_order=2).
+            #Falls back to materialisation for mixed-order datasets (e.g. max_interaction_order>2).
+            pair_orders = list(set(len(idx) for idx in retained_pair_idx)) if retained_pair_idx else []
+            if len(pair_orders) <= 1:
+                self._interaction_col_pairs = (
+                    np.array(retained_pair_idx, dtype=np.int32) if retained_features
+                    else np.empty((0, 2), dtype=np.int32))
+                self._interaction_feature_names = retained_features
+                self.Xohi = self.Xoh
+            else:
+                #Mixed interaction orders: fall back to materialisation
+                if retained_features:
+                    retained_orders_all_2 = all(len(idx) == 2 for idx in retained_pair_idx)
+                    int_chunks = []
+                    for start in range(0, len(retained_pair_idx), CHUNK):
+                        end = min(start + CHUNK, len(retained_pair_idx))
+                        chunk = retained_pair_idx[start:end]
+                        if retained_orders_all_2:
+                            ri = np.array([p[0] for p in chunk], dtype=np.int32)
+                            rj = np.array([p[1] for p in chunk], dtype=np.int32)
+                            int_chunks.append((X_np[:, ri] * X_np[:, rj]).astype(np.int8))
+                        else:
+                            cols = []
+                            for idx in chunk:
+                                if len(idx) == 2:
+                                    cols.append((X_np[:, idx[0]] * X_np[:, idx[1]]).astype(np.int8))
+                                else:
+                                    cols.append(X_np[:, idx].prod(axis=1).astype(np.int8))
+                            int_chunks.append(np.column_stack(cols))
+                    int_matrix = np.concatenate(int_chunks, axis=1)
+                    Xohi_interactions = pd.DataFrame(
+                        int_matrix, index=self.Xoh.index, columns=retained_features)
+                    reorder_lookup = {c: i for i, c in enumerate(all_features_flat)}
+                    ordered_cols = sorted(retained_features, key=lambda c: reorder_lookup[c])
+                    Xohi_interactions = Xohi_interactions[ordered_cols]
+                    self.Xohi = pd.concat([self.Xoh, Xohi_interactions], axis=1)
+                else:
+                    self.Xohi = copy.deepcopy(self.Xoh)
+                self._interaction_col_pairs = None
+                self._interaction_feature_names = []
 
-        #Save interaction feature names
-        self.feature_names = self.Xohi.columns
+        #Save feature names (1st-order from Xohi + interaction names for on-the-fly path)
+        if self._interaction_col_pairs is not None and len(self._interaction_col_pairs) > 0:
+            self.feature_names = pd.Index(list(self.Xohi.columns) + self._interaction_feature_names)
+        else:
+            self.feature_names = self.Xohi.columns
 
     def filter_features(
         self, 
@@ -1148,6 +1200,48 @@ class MochiData:
         #Filter features
         features_order = [i for i in input_df.columns if i in features]
         return input_df.loc[:,features_order]
+
+    def _compute_interaction_colsums(self, row_mask):
+        """
+        Compute column sums of the interaction features for the given boolean row mask.
+        Used in cvgroup/holdout logic without materialising the full interaction matrix.
+
+        :param row_mask: boolean numpy array of length n_variants.
+        :returns: pandas Series indexed by interaction feature name.
+        """
+        pairs = getattr(self, '_interaction_col_pairs', None)
+        names = getattr(self, '_interaction_feature_names', [])
+        if pairs is None or len(pairs) == 0:
+            return pd.Series(dtype=float)
+        X_sub = self.Xoh.values[row_mask].astype(np.uint8)
+        CHUNK = 1000
+        sums = np.empty(len(pairs), dtype=np.int32)
+        for s in range(0, len(pairs), CHUNK):
+            e = min(s + CHUNK, len(pairs))
+            sums[s:e] = (X_sub[:, pairs[s:e, 0]] * X_sub[:, pairs[s:e, 1]]).sum(axis=0)
+        return pd.Series(sums, index=names)
+
+    def _compute_interaction_rowsums(self, row_mask, interaction_names):
+        """
+        Compute per-row sums of specific interaction features for the given row mask.
+        Used in holdout logic to determine which variants carry rare interaction features.
+
+        :param row_mask: boolean numpy array of length n_variants.
+        :param interaction_names: list of interaction feature names to sum over.
+        :returns: numpy int32 array of length row_mask.sum().
+        """
+        pairs = getattr(self, '_interaction_col_pairs', None)
+        names = getattr(self, '_interaction_feature_names', [])
+        if pairs is None or len(pairs) == 0 or not interaction_names:
+            return np.zeros(int(row_mask.sum()), dtype=np.int32)
+        X_sub = self.Xoh.values[row_mask].astype(np.uint8)
+        name_to_idx = {n: i for i, n in enumerate(names)}
+        rowsums = np.zeros(X_sub.shape[0], dtype=np.int32)
+        for fname in interaction_names:
+            if fname in name_to_idx:
+                pidx = name_to_idx[fname]
+                rowsums += (X_sub[:, pairs[pidx, 0]] * X_sub[:, pairs[pidx, 1]]).astype(np.int32)
+        return rowsums
 
     def H_matrix(
         self,
@@ -1339,26 +1433,35 @@ class MochiData:
         for t in all_traits_unique:
             #Phenotypes reporting on this trait
             relevant_phenotype_columns = ["phenotype_"+str(self.model_design.loc[i,'phenotype']) for i in range(len(self.model_design)) if t in self.model_design.loc[i,'trait']]
-            #Number of observations per coefficient
-            Xohp_colsum = pd.DataFrame(input_df.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,:].sum(axis=0))
+            pheno_mask = self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1
+            row_mask_np = pheno_mask.values
+            #Number of observations per coefficient (1st-order + interaction features)
+            Xohp_colsum_1st = input_df.loc[pheno_mask,:].sum(axis=0)
+            int_sums = self._compute_interaction_colsums(row_mask_np)
+            Xohp_colsum = pd.DataFrame(pd.concat([Xohp_colsum_1st, int_sums]))
             #Indices of coefficients that do not meet required threshold
             Xohp_noholdout = list(Xohp_colsum.loc[Xohp_colsum.iloc[:,0]<self.holdout_minobs,:].index)
             #Observations of coefficients that do not meet the required threshold
-            Xohp_noholdout_rowsum = np.array(input_df.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,Xohp_noholdout].sum(axis=1))
+            noholdout_1st = [f for f in Xohp_noholdout if f in input_df.columns]
+            noholdout_int = [f for f in Xohp_noholdout if f not in input_df.columns]
+            rowsum_1st = (np.array(input_df.loc[pheno_mask, noholdout_1st].sum(axis=1))
+                          if noholdout_1st else np.zeros(int(row_mask_np.sum()), dtype=np.int32))
+            rowsum_int = self._compute_interaction_rowsums(row_mask_np, noholdout_int)
+            Xohp_noholdout_rowsum = rowsum_1st + rowsum_int
             #WT variants for these phenotypes
-            Xohp_WT = np.array(self.fdata.vtable.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'WT'])
+            Xohp_WT = np.array(self.fdata.vtable.loc[pheno_mask,'WT'])
             #Mutation orders for these phenotypes
-            Xohp_mutationOrder = np.array(self.fdata.vtable.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,self.fdata.mutationOrderCol])
+            Xohp_mutationOrder = np.array(self.fdata.vtable.loc[pheno_mask,self.fdata.mutationOrderCol])
             #Current holdout status
-            current_status = list(self.cvgroups.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'holdout'])
+            current_status = list(self.cvgroups.loc[pheno_mask,'holdout'])
             #Holdout status for this additive trait
             noholdout_minobs = [Xohp_noholdout_rowsum[i]!=0 for i in range(len(Xohp_noholdout_rowsum))]
             noholdout_orders = [Xohp_mutationOrder[i] not in self.holdout_orders for i in range(len(Xohp_noholdout_rowsum))]
             noholdout_WT = [((Xohp_WT[i]==True) & (self.holdout_WT==False)) for i in range(len(Xohp_noholdout_rowsum))]
             noholdout = [(noholdout_minobs[i] | noholdout_orders[i] | noholdout_WT[i]) for i in range(len(Xohp_noholdout_rowsum))]
             #New holdout status
-            self.cvgroups.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'holdout'] = np.asarray([int((current_status[i]==1) & (noholdout[i]==False)) for i in range(len(Xohp_noholdout_rowsum))])
-        
+            self.cvgroups.loc[pheno_mask,'holdout'] = np.asarray([int((current_status[i]==1) & (noholdout[i]==False)) for i in range(len(Xohp_noholdout_rowsum))])
+
     def define_cross_validation_groups(
         self):
         """
@@ -1383,25 +1486,34 @@ class MochiData:
             for t in all_traits_unique:
                 #Phenotypes reporting on this trait
                 relevant_phenotype_columns = ["phenotype_"+str(self.model_design.loc[i,'phenotype']) for i in range(len(self.model_design)) if t in self.model_design.loc[i,'trait']]
-                #Number of observations per coefficient
-                Xohp_colsum = pd.DataFrame(self.Xohi.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,:].sum(axis=0))
+                pheno_mask = self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1
+                row_mask_np = pheno_mask.values
+                #Number of observations per coefficient (1st-order + interaction features)
+                Xohp_colsum_1st = self.Xohi.loc[pheno_mask,:].sum(axis=0)
+                int_sums = self._compute_interaction_colsums(row_mask_np)
+                Xohp_colsum = pd.DataFrame(pd.concat([Xohp_colsum_1st, int_sums]))
                 #Indices of coefficients that do not meet required threshold
                 Xohp_noholdout = list(Xohp_colsum.loc[Xohp_colsum.iloc[:,0]<self.holdout_minobs,:].index)
                 #Observations of coefficients that do not meet the required threshold
-                Xohp_noholdout_rowsum = np.array(self.Xohi.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,Xohp_noholdout].sum(axis=1))
+                noholdout_1st = [f for f in Xohp_noholdout if f in self.Xohi.columns]
+                noholdout_int = [f for f in Xohp_noholdout if f not in self.Xohi.columns]
+                rowsum_1st = (np.array(self.Xohi.loc[pheno_mask, noholdout_1st].sum(axis=1))
+                              if noholdout_1st else np.zeros(int(row_mask_np.sum()), dtype=np.int32))
+                rowsum_int = self._compute_interaction_rowsums(row_mask_np, noholdout_int)
+                Xohp_noholdout_rowsum = rowsum_1st + rowsum_int
                 #WT variants for these phenotypes
-                Xohp_WT = np.array(self.fdata.vtable.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'WT'])
+                Xohp_WT = np.array(self.fdata.vtable.loc[pheno_mask,'WT'])
                 #Mutation orders for these phenotypes
-                Xohp_mutationOrder = np.array(self.fdata.vtable.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,self.fdata.mutationOrderCol])
+                Xohp_mutationOrder = np.array(self.fdata.vtable.loc[pheno_mask,self.fdata.mutationOrderCol])
                 #Current holdout status
-                current_status = list(self.cvgroups.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'holdout'])
+                current_status = list(self.cvgroups.loc[pheno_mask,'holdout'])
                 #Holdout status for this additive trait
                 noholdout_minobs = [Xohp_noholdout_rowsum[i]!=0 for i in range(len(Xohp_noholdout_rowsum))]
                 noholdout_orders = [Xohp_mutationOrder[i] not in self.holdout_orders for i in range(len(Xohp_noholdout_rowsum))]
                 noholdout_WT = [((Xohp_WT[i]==True) & (self.holdout_WT==False)) for i in range(len(Xohp_noholdout_rowsum))]
                 noholdout = [(noholdout_minobs[i] | noholdout_orders[i] | noholdout_WT[i]) for i in range(len(Xohp_noholdout_rowsum))]
                 #New holdout status
-                self.cvgroups.loc[self.phenotypes.loc[:,relevant_phenotype_columns].sum(axis=1)==1,'holdout'] = np.asarray([int((current_status[i]==1) & (noholdout[i]==False)) for i in range(len(Xohp_noholdout_rowsum))])
+                self.cvgroups.loc[pheno_mask,'holdout'] = np.asarray([int((current_status[i]==1) & (noholdout[i]==False)) for i in range(len(Xohp_noholdout_rowsum))])
         
         #Total number of variants that can be held out
         n_holdout = sum(self.cvgroups.holdout)
@@ -1432,13 +1544,21 @@ class MochiData:
         :param k_folds: Number of cross-validation folds (default:10).
         :returns: Nothing.
         """
-        #Cefficients that can be fit (for each phenotype and fold)
+        _pairs = getattr(self, '_interaction_col_pairs', None)
+        on_the_fly = _pairs is not None and len(_pairs) > 0
+
+        #Coefficients that can be fit (for each phenotype and fold)
         self.coefficients = {}
         for p in self.phenotypes.columns:
-            # self.coefficients[p] = pd.DataFrame({'id': list(self.Xohi.columns)})
             self.coefficients[p] = pd.DataFrame()
             for i in range(k_folds):
-                Xohp_colsum = pd.DataFrame(self.Xohi.loc[(self.phenotypes[p]==1) & (self.cvgroups['fold_'+str(i+1)]=="training"),:].sum(axis=0))
+                train_mask = (self.phenotypes[p]==1) & (self.cvgroups['fold_'+str(i+1)]=="training")
+                Xohp_colsum_1st = pd.DataFrame(self.Xohi.loc[train_mask,:].sum(axis=0))
+                if on_the_fly:
+                    int_sums = self._compute_interaction_colsums(train_mask.values)
+                    Xohp_colsum = pd.concat([Xohp_colsum_1st, pd.DataFrame(int_sums)])
+                else:
+                    Xohp_colsum = Xohp_colsum_1st
                 self.coefficients[p]['fold_'+str(i+1)] = np.asarray([int(j!=0) for j in list(Xohp_colsum.iloc[:,0])])
 
         #Coefficients specified to be fit (for each additive trait)
@@ -1446,9 +1566,15 @@ class MochiData:
         for t in range(len(self.additive_trait_names)):
             tcol = "additive_trait_"+str(t+1)
             if self.additive_trait_names[t] in self.features_trait.keys():
-                self.coefficients_userspec[tcol] = np.asarray([int(i in self.features_trait[self.additive_trait_names[t]]) for i in self.Xohi.columns])
+                feat_set = set(self.features_trait[self.additive_trait_names[t]])
+                coef_1st = [int(i in feat_set) for i in self.Xohi.columns]
+                if on_the_fly:
+                    coef_int = [int(all(self.Xoh.columns[pidx] in feat_set for pidx in pair)) for pair in _pairs]
+                else:
+                    coef_int = []
+                self.coefficients_userspec[tcol] = np.asarray(coef_1st + coef_int)
             else:
-                self.coefficients_userspec[tcol] = np.asarray([1 for i in self.Xohi.columns])
+                self.coefficients_userspec[tcol] = np.ones(len(self.feature_names), dtype=int)
 
     def is_valid_instance(
         self):
@@ -1488,6 +1614,14 @@ class MochiData:
         if not self.is_valid_instance():
             print("Error: Invalid MochiData instance.")
             raise ValueError
+        #Build interaction pairs tensor once (None when on-the-fly path is inactive)
+        _pairs = getattr(self, '_interaction_col_pairs', None)
+        interaction_pairs_t = (
+            torch.tensor(_pairs, dtype=torch.long)
+            if _pairs is not None and len(_pairs) > 0
+            else None)
+        #Use Xoh (1st-order only) for the on-the-fly path; fall back to full Xohi otherwise
+        X_source = self.Xoh if _pairs is not None else self.Xohi
         #Loop over training, validation and test sets
         fold_name = "fold_"+str(fold)
         data_dict = {}
@@ -1512,8 +1646,8 @@ class MochiData:
             mask_us = torch.transpose(torch.tensor(np.asarray(self.coefficients_userspec), dtype=torch.float32), 0, 1)
             mask_us = torch.reshape(mask_us, (mask_us.shape[0],1,mask_us.shape[1]))
             data_dict[g]['mask'] = data_dict[g]['mask']*mask_us
-            #Feature tensor
-            data_dict[g]['X'] = pd.DataFrame(self.Xohi.loc[self.cvgroups[fold_name]==g,:])
+            #Feature tensor (1st-order only for on-the-fly path; full Xohi otherwise)
+            data_dict[g]['X'] = pd.DataFrame(X_source.loc[self.cvgroups[fold_name]==g,:])
             data_dict[g]['X'].reset_index(drop = True, inplace = True)
             data_dict[g]['X'] = torch.tensor(np.asarray(data_dict[g]['X'].loc[sind,:]), dtype=torch.float32)
             #Target tensor
@@ -1529,6 +1663,8 @@ class MochiData:
             data_dict[g]['y_wt'] = pd.DataFrame(self.fitness.loc[self.cvgroups[fold_name]==g,'weight'])
             data_dict[g]['y_wt'].reset_index(drop = True, inplace = True)
             data_dict[g]['y_wt'] = torch.reshape(torch.tensor(np.asarray(data_dict[g]['y_wt'].loc[sind,:]), dtype=torch.float32), (-1, 1))
+        #Attach interaction pairs tensor so get_data_loaders() can thread it through
+        data_dict['interaction_pairs'] = interaction_pairs_t
         return data_dict
 
     def get_data_index(
@@ -1549,10 +1685,17 @@ class MochiData:
         data_dict['select'] = pd.DataFrame(self.phenotypes.iloc[indices,:])
         data_dict['select'].reset_index(drop = True, inplace = True)
         data_dict['select'] = torch.tensor(np.asarray(data_dict['select']), dtype=torch.float32)
-        #Feature tensor
-        data_dict['X'] = pd.DataFrame(self.Xohi.iloc[indices,:])
+        #Feature tensor (1st-order only when on-the-fly; callers expand using interaction_pairs)
+        _pairs = getattr(self, '_interaction_col_pairs', None)
+        X_source = self.Xoh if (_pairs is not None) else self.Xohi
+        data_dict['X'] = pd.DataFrame(X_source.iloc[indices,:])
         data_dict['X'].reset_index(drop = True, inplace = True)
         data_dict['X'] = torch.tensor(np.asarray(data_dict['X']), dtype=torch.float32)
+        #Interaction pairs tensor so callers can expand X on-the-fly
+        data_dict['interaction_pairs'] = (
+            torch.tensor(_pairs, dtype=torch.long)
+            if _pairs is not None and len(_pairs) > 0
+            else None)
         #Target tensor
         data_dict['y'] = pd.DataFrame(self.fitness.iloc[indices,:]['fitness'])
         data_dict['y'].reset_index(drop = True, inplace = True)
@@ -1654,10 +1797,11 @@ class FastTensorDataLoader:
     Source: https://discuss.pytorch.org/t/dataloader-much-slower-than-manual-batching/27014/6
     """
     def __init__(
-        self, 
-        *tensors, 
-        batch_size = 32, 
-        shuffle = False):
+        self,
+        *tensors,
+        batch_size = 32,
+        shuffle = False,
+        interaction_pairs = None):
         """
         Initialize a FastTensorDataLoader.
 
@@ -1665,10 +1809,15 @@ class FastTensorDataLoader:
         :param batch_size: batch size to load.
         :param shuffle: if True, shuffle the data *in-place* whenever an
             iterator is created out of this object.
+        :param interaction_pairs: optional long tensor of shape (n_pairs, order) whose
+            columns are indices into tensors[1] (the feature tensor). When supplied,
+            interaction columns are computed on-the-fly each batch and appended to
+            tensors[1] before yielding. Default: None (no on-the-fly expansion).
         :returns: FastTensorDataLoader object.
         """
         assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
         self.tensors = tensors
+        self.interaction_pairs = interaction_pairs
 
         self.dataset_len = self.tensors[0].shape[0]
         self.batch_size = batch_size
@@ -1679,6 +1828,7 @@ class FastTensorDataLoader:
         if remainder > 0:
             n_batches += 1
         self.n_batches = n_batches
+
     def __iter__(self):
         if self.shuffle:
             r = torch.randperm(self.dataset_len)
@@ -1689,9 +1839,18 @@ class FastTensorDataLoader:
     def __next__(self):
         if self.i >= self.dataset_len:
             raise StopIteration
-        batch = tuple(t[self.i:self.i+self.batch_size] for t in self.tensors)
-        self.i += self.batch_size
-        return batch
+        bs = min(self.batch_size, self.dataset_len - self.i)
+        batch = list(t[self.i:self.i+bs] for t in self.tensors)
+        if self.interaction_pairs is not None:
+            X_1st = batch[1]                       # tensors[1] is always the feature tensor X
+            pairs = self.interaction_pairs          # (n_pairs, order)
+            if pairs.shape[1] == 2:
+                X_int = X_1st[:, pairs[:, 0]] * X_1st[:, pairs[:, 1]]
+            else:
+                X_int = torch.prod(X_1st[:, pairs], dim=-1)
+            batch[1] = torch.cat([X_1st, X_int], dim=1)
+        self.i += bs
+        return tuple(batch)
 
     def __len__(self):
         return self.n_batches

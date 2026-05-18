@@ -205,8 +205,8 @@ class MochiModel(torch.nn.Module):
             self.linears[i].bias.data.fill_(linear_bias[i])
 
     def get_data_loaders(
-        self, 
-        data, 
+        self,
+        data,
         batch_size):
         """
         Get list of dataloaders.
@@ -214,14 +214,18 @@ class MochiModel(torch.nn.Module):
         :param data: Dictionary of dictionaries of tensors as output by MochiData.get_data (required).
         :param batch_size: Minibatch size (required).
         :returns: Tuple of dataloaders.
-        """ 
+        """
+        interaction_pairs = data.get('interaction_pairs', None)
         dataloader_list = []
         for k in ['training', 'validation', 'test']:
             dataloader_list.append(FastTensorDataLoader(
-                data[k]["select"], 
-                data[k]["X"], 
-                data[k]["y"], 
-                data[k]["y_wt"], batch_size=batch_size, shuffle=True))
+                data[k]["select"],
+                data[k]["X"],
+                data[k]["y"],
+                data[k]["y_wt"],
+                batch_size=batch_size,
+                shuffle=True,
+                interaction_pairs=interaction_pairs))
         return tuple(dataloader_list)
 
     def calculate_l1l2_norm(self):
@@ -339,9 +343,21 @@ class MochiModel(torch.nn.Module):
                              + l1_int_lam * l1_int + l2_int_lam * l2_int).item()
             #Training history - WT residuals
             if data_WT!=None:
-                select_WT, X_WT, y_WT = data_WT['select'].to(device), data_WT['X'].to(device), data_WT['y'].to(device)
+                select_WT = data_WT['select'].to(device)
+                y_WT = data_WT['y'].to(device)
+                X_WT_1st = data_WT['X'].to(device)
+                int_pairs_WT = data_WT.get('interaction_pairs', None)
+                if int_pairs_WT is not None:
+                    ip = int_pairs_WT.to(device)
+                    if ip.shape[1] == 2:
+                        X_int = X_WT_1st[:, ip[:, 0]] * X_WT_1st[:, ip[:, 1]]
+                    else:
+                        X_int = torch.prod(X_WT_1st[:, ip], dim=-1)
+                    X_WT = torch.cat([X_WT_1st, X_int], dim=1)
+                else:
+                    X_WT = X_WT_1st
                 pred_WT = self(select_WT, X_WT, mask)
-                val_WT_resid = list(np.asarray((y_WT - pred_WT).detach().cpu()))
+                val_WT_resid = list(np.asarray((y_WT - pred_WT).detach().cpu()).flatten())
         val_loss /= num_batches
         #Save training history - validation loss
         self.training_history["val_loss"].append(val_loss)
@@ -641,7 +657,7 @@ class MochiTask():
         """ 
         #Create a new model
         model = MochiModel(
-            input_shape = data['training']['X'].shape[1],
+            input_shape = len(self.data.feature_names),
             mask = data['training']['mask'],
             model_design = self.data.model_design,
             custom_transformations = self.data.custom_transformations,
@@ -1602,8 +1618,9 @@ class MochiTask():
             data = self.data
         model_data = data.get_data_index()
         model_data_loader = FastTensorDataLoader(
-            model_data["select"], 
-            model_data["X"], batch_size=1024, shuffle=False)
+            model_data["select"],
+            model_data["X"], batch_size=1024, shuffle=False,
+            interaction_pairs=model_data.get('interaction_pairs', None))
 
         #Predictions on all data
         pred_list = []
